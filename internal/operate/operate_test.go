@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
@@ -256,6 +257,118 @@ func TestPublishHappyPath(t *testing.T) {
 	}
 	if !rep.OK {
 		t.Errorf("Verify failed:\n  issues: %v\n  warnings: %v", rep.Issues, rep.Warnings)
+	}
+}
+
+// TestPublishMaterialisesPackageBytes guards against the regression
+// where index entries pointed at /p/<name>/<version>/<filename> but
+// the actual .peipkg bytes were never copied into the output state —
+// the index claimed packages that were missing on disk, breaking
+// rclone-sync uploads and direct hash verification.
+func TestPublishMaterialisesPackageBytes(t *testing.T) {
+	dir := t.TempDir()
+	state1 := filepath.Join(dir, "state1")
+	state2 := filepath.Join(dir, "state2")
+	pkgs := filepath.Join(dir, "pkgs")
+	if err := os.MkdirAll(pkgs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	priv, _ := makeTestKey(t)
+
+	if err := Init(InitConfig{
+		Name: "rt", SignKey: priv,
+		Timestamp: "2026-05-07T00:00:00Z", Out: state1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	writeTestPeipkg(t, pkgs, "alpha", "1.0-1", "noarch")
+	writeTestPeipkg(t, pkgs, "beta", "0.5-1", "x86_64")
+
+	if _, err := Publish(PublishConfig{
+		In:             state1,
+		NewPackagesDir: pkgs,
+		SignKey:        priv,
+		Timestamp:      "2026-05-07T01:00:00Z",
+		Out:            state2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := state.Load(state2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range loaded.Archive.Packages {
+		// The index entry's URL is repo-rooted; the bytes must live at
+		// state2/<URL with leading slash trimmed>.
+		want := filepath.Join(state2, strings.TrimPrefix(p.URL, "/"))
+		if _, err := os.Stat(want); err != nil {
+			t.Errorf("package %s_%s: bytes missing at %s: %v", p.Name, p.Version, want, err)
+		}
+	}
+}
+
+// TestPublishOutOfPlaceCarriesForwardArchiveBytes guards against an
+// out-of-place publish dropping previously-archived package bytes:
+// each generation of state must carry every archived .peipkg forward
+// so historical packages remain fetchable from the new state.
+func TestPublishOutOfPlaceCarriesForwardArchiveBytes(t *testing.T) {
+	dir := t.TempDir()
+	state1 := filepath.Join(dir, "state1")
+	state2 := filepath.Join(dir, "state2")
+	state3 := filepath.Join(dir, "state3")
+	priv, _ := makeTestKey(t)
+
+	if err := Init(InitConfig{
+		Name: "rt", SignKey: priv,
+		Timestamp: "2026-05-07T00:00:00Z", Out: state1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// First publish: alpha 1.0.
+	pkgs1 := filepath.Join(dir, "pkgs1")
+	os.MkdirAll(pkgs1, 0o755)
+	writeTestPeipkg(t, pkgs1, "alpha", "1.0-1", "noarch")
+	if _, err := Publish(PublishConfig{
+		In:             state1,
+		NewPackagesDir: pkgs1,
+		SignKey:        priv,
+		Timestamp:      "2026-05-07T01:00:00Z",
+		Out:            state2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second publish: alpha 2.0. state3 must contain BOTH versions'
+	// bytes — 1.0 from the previous archive (carry-forward) plus the
+	// new 2.0 (materialise).
+	pkgs2 := filepath.Join(dir, "pkgs2")
+	os.MkdirAll(pkgs2, 0o755)
+	writeTestPeipkg(t, pkgs2, "alpha", "2.0-1", "noarch")
+	if _, err := Publish(PublishConfig{
+		In:             state2,
+		NewPackagesDir: pkgs2,
+		SignKey:        priv,
+		Timestamp:      "2026-05-07T02:00:00Z",
+		Out:            state3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := state.Load(state3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Archive.Packages) != 2 {
+		t.Fatalf("expected 2 archived packages in state3, got %d", len(loaded.Archive.Packages))
+	}
+	for _, p := range loaded.Archive.Packages {
+		want := filepath.Join(state3, strings.TrimPrefix(p.URL, "/"))
+		if _, err := os.Stat(want); err != nil {
+			t.Errorf("package %s_%s: bytes missing at %s: %v", p.Name, p.Version, want, err)
+		}
 	}
 }
 

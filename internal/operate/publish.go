@@ -85,21 +85,27 @@ func Publish(cfg PublishConfig) (*PublishReport, error) {
 
 	report := &PublishReport{}
 
+	// readAllPeipkgs returns paired (entry, sourcePath) slices so the
+	// bytes can be copied into the output state once index assignment
+	// is decided.
 	var newEntries []index.Package
+	var newSources []string
 	if cfg.Rebuild {
-		entries, err := readAllPeipkgs(cfg.AllPackagesDir, template)
+		entries, sources, err := readAllPeipkgs(cfg.AllPackagesDir, template)
 		if err != nil {
 			return nil, err
 		}
 		newEntries = entries
+		newSources = sources
 		// In rebuild mode we discard the previous archive and rebuild from disk.
 		prev.Archive.Packages = nil
 	} else {
-		entries, err := readAllPeipkgs(cfg.NewPackagesDir, template)
+		entries, sources, err := readAllPeipkgs(cfg.NewPackagesDir, template)
 		if err != nil {
 			return nil, err
 		}
 		newEntries = entries
+		newSources = sources
 	}
 
 	// Build the merged archive: previous archive entries plus new ones.
@@ -168,6 +174,19 @@ func Publish(cfg PublishConfig) (*PublishReport, error) {
 		return nil, fmt.Errorf("save state: %w", err)
 	}
 
+	// Copy the new .peipkg bytes into the output state at the path
+	// implied by each entry's URL. Entries whose URL is absolute
+	// (http(s)://) are external — operator stores the bytes elsewhere
+	// (GitHub Releases, S3 outside this repo, etc.) and we just record
+	// the index entry pointing at it. Relative URLs (starting with "/")
+	// are repo-rooted: bytes must live at <Out>/<URL> for a consumer
+	// fetching <repo-base>/<URL> to find them.
+	for i := range newEntries {
+		if err := materialisePackage(cfg.Out, newEntries[i].URL, newSources[i]); err != nil {
+			return nil, fmt.Errorf("materialise %s: %w", newSources[i], err)
+		}
+	}
+
 	// Carry forward any public-key files from the previous state. Publish
 	// does not change the trust set; whatever .pub files were in In/keys
 	// must still be in Out/keys for the descriptor's signing.keys[].url
@@ -175,6 +194,17 @@ func Publish(cfg PublishConfig) (*PublishReport, error) {
 	if cfg.In != cfg.Out {
 		if err := copyKeysDir(cfg.In, cfg.Out); err != nil {
 			return nil, fmt.Errorf("carry-forward keys directory: %w", err)
+		}
+	}
+
+	// Carry forward already-published .peipkg files when In and Out are
+	// distinct directories. Without this, an out-of-place publish loses
+	// every previously-archived package's bytes (the index still
+	// references them, but the files are only at In). In-place publish
+	// (In == Out) preserves them automatically.
+	if cfg.In != cfg.Out {
+		if err := carryForwardPackages(cfg.In, cfg.Out, prev.Archive.Packages); err != nil {
+			return nil, fmt.Errorf("carry-forward packages: %w", err)
 		}
 	}
 
@@ -256,18 +286,20 @@ func validatePublish(cfg PublishConfig) error {
 }
 
 // readAllPeipkgs walks dir (non-recursively) for *.peipkg files, parses
-// each, and returns one index.Package per file. Files whose names don't
-// end in .peipkg are ignored.
-func readAllPeipkgs(dir, urlTemplate string) ([]index.Package, error) {
+// each, and returns one index.Package per file along with each file's
+// source path so callers can copy the bytes after index assignment.
+// Files whose names don't end in .peipkg are ignored.
+func readAllPeipkgs(dir, urlTemplate string) ([]index.Package, []string, error) {
 	if dir == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", dir, err)
+		return nil, nil, fmt.Errorf("read %s: %w", dir, err)
 	}
 
 	var out []index.Package
+	var sources []string
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -279,7 +311,7 @@ func readAllPeipkgs(dir, urlTemplate string) ([]index.Package, error) {
 		path := filepath.Join(dir, name)
 		f, err := readPeipkg(path)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		filename := name
@@ -309,8 +341,67 @@ func readAllPeipkgs(dir, urlTemplate string) ([]index.Package, error) {
 			},
 		}
 		out = append(out, entry)
+		sources = append(sources, path)
 	}
-	return out, nil
+	return out, sources, nil
+}
+
+// materialisePackage places a .peipkg's bytes into the output state at
+// the path implied by entryURL. Absolute URLs (http(s)://) are external
+// — bytes stay where the operator put them and this function no-ops.
+// Relative URLs are repo-rooted: bytes are copied to <out>/<URL with
+// leading slash trimmed>.
+func materialisePackage(outDir, entryURL, sourcePath string) error {
+	if strings.HasPrefix(entryURL, "http://") || strings.HasPrefix(entryURL, "https://") {
+		return nil
+	}
+	rel := strings.TrimPrefix(entryURL, "/")
+	if rel == "" {
+		return fmt.Errorf("entry URL %q is empty after trimming leading slash", entryURL)
+	}
+	dst := filepath.Join(outDir, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return copyFile(sourcePath, dst)
+}
+
+// carryForwardPackages copies every .peipkg whose URL is repo-rooted
+// from <inDir>/<URL> to <outDir>/<URL>. Used when In and Out are
+// distinct so an out-of-place publish does not lose previously-archived
+// package bytes. Already-existing destination files are left alone
+// (cheap idempotency for repeated publishes that wrote partial state).
+func carryForwardPackages(inDir, outDir string, archive []index.Package) error {
+	for _, p := range archive {
+		if strings.HasPrefix(p.URL, "http://") || strings.HasPrefix(p.URL, "https://") {
+			continue
+		}
+		rel := strings.TrimPrefix(p.URL, "/")
+		if rel == "" {
+			continue
+		}
+		dst := filepath.Join(outDir, filepath.FromSlash(rel))
+		if _, err := os.Stat(dst); err == nil {
+			continue
+		}
+		src := filepath.Join(inDir, filepath.FromSlash(rel))
+		if _, err := os.Stat(src); err != nil {
+			if os.IsNotExist(err) {
+				// Source missing too — nothing we can do; an earlier
+				// publish under a buggy version may have skipped the
+				// materialise step. Caller can recover via --rebuild.
+				continue
+			}
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		if err := copyFile(src, dst); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // renderURL substitutes {name}, {version}, {arch}, {filename} into the
