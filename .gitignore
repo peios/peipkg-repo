@@ -1,0 +1,5 @@
+# Dev-only fixtures: real index pulled from pkgs.peios.org for local
+# preview. Not part of the embedded site; the live index/ is produced by
+# `peipkg-repo publish` into the repo dir at publish time.
+/web/index/
+/web/p/

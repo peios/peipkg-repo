@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>peios packages</title>
+<meta name="description" content="Browse and search the official Peios package repository — pkgs.peios.org">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Martian+Mono:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+<div class="grain" aria-hidden="true"></div>
+
+<header class="masthead">
+  <a class="brand" href="/" aria-label="peios packages home">
+    <span class="brand-mark">peios<span class="caret" aria-hidden="true"></span></span>
+    <span class="brand-sub">// packages</span>
+  </a>
+  <dl class="repo-meta" id="repo-meta" aria-label="repository metadata">
+    <!-- populated by app.js -->
+  </dl>
+</header>
+
+<main class="browser">
+  <aside class="pane pane-list">
+    <div class="search">
+      <div class="search-field">
+        <span class="search-prompt" aria-hidden="true">&gt;</span>
+        <input id="q" type="search" autocomplete="off" spellcheck="false"
+               placeholder="search packages&hellip;" aria-label="search packages">
+        <kbd class="search-kbd" aria-hidden="true">/</kbd>
+      </div>
+      <p class="search-count" id="count" aria-live="polite"></p>
+    </div>
+    <div class="list-scroll">
+      <ol class="pkg-list" id="list" role="listbox" aria-label="packages" tabindex="0"></ol>
+      <p class="empty" id="empty" hidden>No packages match your search.</p>
+    </div>
+  </aside>
+  <section class="pane pane-detail" id="detail" aria-live="polite">
+    <!-- populated by app.js -->
+  </section>
+</main>
+
+<footer class="footer">
+  <span class="footer-cell">served from Cloudflare R2</span>
+  <nav class="footer-links">
+    <a href="/repo.json">repo.json</a>
+    <a href="/index/active.json">active.json</a>
+    <a href="/index/archive.json">archive.json</a>
+    <a href="/keys/">signing keys</a>
+  </nav>
+</footer>
+
+<template id="error-tpl">
+  <div class="state-msg">
+    <h2>Couldn&rsquo;t load the package index.</h2>
+    <p>The repository index at <code>/index/active.json</code> could not be fetched.</p>
+  </div>
+</template>
+
+<script src="/assets/app.js" defer></script>
+</body>
+</html>

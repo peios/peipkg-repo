@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +14,7 @@ import (
 	"github.com/peios/peipkg-repo/internal/index"
 	"github.com/peios/peipkg-repo/internal/state"
 	"github.com/peios/peipkg-repo/internal/version"
+	"github.com/peios/peipkg-repo/web"
 )
 
 // PublishConfig configures Publish.
@@ -208,8 +210,117 @@ func Publish(cfg PublishConfig) (*PublishReport, error) {
 		}
 	}
 
+	// Materialise the static package-browser site and the per-package
+	// metadata sidecars (manifest.json, files.json) into the output
+	// state. Both are unsigned conveniences served at the repository
+	// root; trust derives from the signed indexes the site renders and
+	// the signed copies inside each .peipkg.
+	//
+	// The site is rewritten every publish so it tracks the embedded
+	// version. The sidecar pass runs over the WHOLE archive (not just
+	// newly-added packages) and is idempotent, so the first publish
+	// after an upgrade backfills sidecars for every package already in
+	// the repository, and later publishes skip the ones already done.
+	if err := writeSite(cfg.Out); err != nil {
+		return nil, fmt.Errorf("write browse site: %w", err)
+	}
+	if err := materialiseSidecars(cfg.Out, mergedArchive); err != nil {
+		return nil, fmt.Errorf("materialise sidecars: %w", err)
+	}
+
 	sort.Strings(report.Added)
 	return report, nil
+}
+
+// writeSite copies the embedded package-browser site into outDir,
+// preserving its relative layout (index.html at the root, assets under
+// assets/). Existing files are overwritten so the site always matches
+// the binary that produced this state.
+func writeSite(outDir string) error {
+	return fs.WalkDir(web.FS, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		data, err := fs.ReadFile(web.FS, p)
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(outDir, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(dst, data, 0o644)
+	})
+}
+
+// materialiseSidecars ensures every repo-rooted package in archive has
+// its manifest.json and files.json extracted alongside its .peipkg in
+// outDir. External (http/https) entries and entries whose bytes are not
+// present are skipped. Idempotent: packages whose sidecars already exist
+// are not re-read.
+func materialiseSidecars(outDir string, archive []index.Package) error {
+	for _, p := range archive {
+		if strings.HasPrefix(p.URL, "http://") || strings.HasPrefix(p.URL, "https://") {
+			continue
+		}
+		rel := strings.TrimPrefix(p.URL, "/")
+		if rel == "" {
+			continue
+		}
+		pkgPath := filepath.Join(outDir, filepath.FromSlash(rel))
+		if _, err := os.Stat(pkgPath); err != nil {
+			// Bytes not in this state (e.g. an earlier buggy publish
+			// skipped materialise); nothing to extract from. Recoverable
+			// via --rebuild.
+			continue
+		}
+		if err := writeSidecars(pkgPath, filepath.Dir(pkgPath)); err != nil {
+			return fmt.Errorf("%s: %w", rel, err)
+		}
+	}
+	return nil
+}
+
+// sidecar file names written next to each .peipkg.
+const (
+	manifestSidecar = "manifest.json"
+	filesSidecar    = "files.json"
+)
+
+// writeSidecars extracts the .peipkg/manifest.json and .peipkg/files.json
+// entries from the package at peipkgPath and writes them verbatim into
+// destDir. The manifest is required; files.json is written when present.
+// If both sidecars already exist the package is not re-read (packages are
+// immutable, so existing sidecars are authoritative).
+func writeSidecars(peipkgPath, destDir string) error {
+	manifestDst := filepath.Join(destDir, manifestSidecar)
+	filesDst := filepath.Join(destDir, filesSidecar)
+	if exists(manifestDst) && exists(filesDst) {
+		return nil
+	}
+	f, err := readPeipkg(peipkgPath)
+	if err != nil {
+		return err
+	}
+	if f.manifestRaw != nil {
+		if err := os.WriteFile(manifestDst, f.manifestRaw, 0o644); err != nil {
+			return err
+		}
+	}
+	if f.filesRaw != nil {
+		if err := os.WriteFile(filesDst, f.filesRaw, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // copyKeysDir copies every file under <inDir>/keys/ into <outDir>/keys/.

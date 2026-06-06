@@ -17,6 +17,7 @@ import (
 
 	"github.com/peios/peipkg-repo/internal/signature"
 	"github.com/peios/peipkg-repo/internal/state"
+	"github.com/peios/peipkg-repo/web"
 )
 
 // makeTestKey returns a deterministic Ed25519 key pair for tests.
@@ -583,6 +584,131 @@ func readFile(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// TestPublishMaterialisesSiteAndSidecars asserts that a publish writes
+// the embedded browse site to the repo root and extracts each package's
+// manifest.json and files.json next to its .peipkg — the inputs the
+// package-search website reads at runtime.
+func TestPublishMaterialisesSiteAndSidecars(t *testing.T) {
+	dir := t.TempDir()
+	state1 := filepath.Join(dir, "state1")
+	state2 := filepath.Join(dir, "state2")
+	pkgs := filepath.Join(dir, "pkgs")
+	if err := os.MkdirAll(pkgs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	priv, _ := makeTestKey(t)
+
+	if err := Init(InitConfig{
+		Name: "rt", SignKey: priv,
+		Timestamp: "2026-05-07T00:00:00Z", Out: state1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeTestPeipkg(t, pkgs, "alpha", "1.0-1", "noarch")
+
+	if _, err := Publish(PublishConfig{
+		In: state1, NewPackagesDir: pkgs, SignKey: priv,
+		Timestamp: "2026-05-07T01:00:00Z", Out: state2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Browse site materialised at the repo root, byte-identical to the
+	// embedded copy.
+	wantIndex, err := web.FS.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(state2, "index.html")); !bytes.Equal(got, wantIndex) {
+		t.Error("materialised index.html does not match the embedded site")
+	}
+	for _, asset := range []string{"assets/style.css", "assets/app.js"} {
+		if _, err := os.Stat(filepath.Join(state2, filepath.FromSlash(asset))); err != nil {
+			t.Errorf("missing site asset %s: %v", asset, err)
+		}
+	}
+
+	// Per-package sidecars are the package's own verbatim metadata,
+	// including the source_ref and sd_overrides the index omits.
+	pkgDir := filepath.Join(state2, "p", "alpha", "1.0-1")
+	manifest := readFile(t, filepath.Join(pkgDir, "manifest.json"))
+	if !bytes.Contains(manifest, []byte(`"source_ref":"test://alpha"`)) {
+		t.Errorf("manifest sidecar missing source_ref; got: %s", manifest)
+	}
+	if !bytes.Contains(manifest, []byte(`"sd_overrides"`)) {
+		t.Errorf("manifest sidecar missing sd_overrides; got: %s", manifest)
+	}
+	if files := readFile(t, filepath.Join(pkgDir, "files.json")); !bytes.Contains(files, []byte(`"algorithm":"sha256"`)) {
+		t.Errorf("files.json sidecar malformed; got: %s", files)
+	}
+
+	// Site/sidecars are outside the signed set and must not break
+	// integrity verification.
+	rep, err := Verify(VerifyConfig{Repo: state2, Mode: VerifyAll, AllPackagesDir: pkgs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.OK {
+		t.Errorf("Verify failed after site/sidecar materialise: %v", rep.Issues)
+	}
+}
+
+// TestPublishBackfillsSidecarsForExistingPackages proves the sidecar
+// pass runs over the whole archive, so the first publish after upgrading
+// peipkg-repo backfills packages that predate sidecar support.
+func TestPublishBackfillsSidecarsForExistingPackages(t *testing.T) {
+	dir := t.TempDir()
+	state1 := filepath.Join(dir, "state1")
+	state2 := filepath.Join(dir, "state2")
+	pkgs := filepath.Join(dir, "pkgs")
+	if err := os.MkdirAll(pkgs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	priv, _ := makeTestKey(t)
+
+	if err := Init(InitConfig{
+		Name: "rt", SignKey: priv,
+		Timestamp: "2026-05-07T00:00:00Z", Out: state1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeTestPeipkg(t, pkgs, "alpha", "1.0-1", "noarch")
+	if _, err := Publish(PublishConfig{
+		In: state1, NewPackagesDir: pkgs, SignKey: priv,
+		Timestamp: "2026-05-07T01:00:00Z", Out: state2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate state produced before sidecar support: drop the sidecars
+	// but keep the archived .peipkg bytes.
+	pkgDir := filepath.Join(state2, "p", "alpha", "1.0-1")
+	if err := os.Remove(filepath.Join(pkgDir, "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(pkgDir, "files.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	// An empty in-place publish must regenerate them from the archived
+	// package bytes.
+	empty := filepath.Join(dir, "empty")
+	if err := os.MkdirAll(empty, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Publish(PublishConfig{
+		In: state2, NewPackagesDir: empty, SignKey: priv,
+		Timestamp: "2026-05-07T02:00:00Z", Out: state2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"manifest.json", "files.json"} {
+		if _, err := os.Stat(filepath.Join(pkgDir, s)); err != nil {
+			t.Errorf("backfill did not recreate %s: %v", s, err)
+		}
+	}
 }
 
 // TestEndToEndAgainstRealPeipkgBuild is a bigger integration test that

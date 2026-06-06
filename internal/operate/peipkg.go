@@ -44,8 +44,16 @@ type peipkgManifest struct {
 // peipkgFile is the data peipkg-repo needs from a single .peipkg file
 // to construct its index entry: the parsed manifest plus the SHA-256
 // hash and compressed size of the file as a whole.
+//
+// manifestRaw and filesRaw hold the verbatim bytes of the package's own
+// .peipkg/manifest.json and .peipkg/files.json entries, written out
+// unchanged as repository sidecars so the browse site can render full
+// metadata and the installed-file listing without decompressing the
+// package. filesRaw is nil when the package omits files.json.
 type peipkgFile struct {
 	manifest       peipkgManifest
+	manifestRaw    []byte
+	filesRaw       []byte
 	hashHex        string
 	sizeCompressed int64
 }
@@ -76,25 +84,42 @@ func readPeipkg(path string) (peipkgFile, error) {
 	}
 	defer zr.Close()
 
+	// §3.2 orders the metadata entries manifest.json then files.json
+	// ahead of the payload, so we can stop as soon as both are in hand
+	// rather than decompressing the whole archive (the payload may be
+	// hundreds of MiB).
 	tr := tar.NewReader(zr)
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
-			return f, fmt.Errorf("%s: no .peipkg/manifest.json entry found", path)
+			break
 		}
 		if err != nil {
 			return f, fmt.Errorf("%s: tar walk: %w", path, err)
 		}
-		if h.Name != ".peipkg/manifest.json" {
-			continue
+		switch h.Name {
+		case ".peipkg/manifest.json":
+			body, err := io.ReadAll(tr)
+			if err != nil {
+				return f, fmt.Errorf("%s: read manifest body: %w", path, err)
+			}
+			f.manifestRaw = body
+			if err := json.Unmarshal(body, &f.manifest); err != nil {
+				return f, fmt.Errorf("%s: parse manifest: %w", path, err)
+			}
+		case ".peipkg/files.json":
+			body, err := io.ReadAll(tr)
+			if err != nil {
+				return f, fmt.Errorf("%s: read files.json body: %w", path, err)
+			}
+			f.filesRaw = body
 		}
-		body, err := io.ReadAll(tr)
-		if err != nil {
-			return f, fmt.Errorf("%s: read manifest body: %w", path, err)
+		if f.manifestRaw != nil && f.filesRaw != nil {
+			break
 		}
-		if err := json.Unmarshal(body, &f.manifest); err != nil {
-			return f, fmt.Errorf("%s: parse manifest: %w", path, err)
-		}
-		return f, nil
 	}
+	if f.manifestRaw == nil {
+		return f, fmt.Errorf("%s: no .peipkg/manifest.json entry found", path)
+	}
+	return f, nil
 }

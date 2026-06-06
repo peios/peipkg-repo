@@ -8,9 +8,15 @@
 //	verify   audit an existing state for integrity
 //
 // peipkg-repo emits a directory tree conforming to PSD-009 §6.4. It does
-// not upload, serve, or otherwise publish the bytes — the operator's
-// build farm runs `aws s3 sync`, `git push`, `gh release create`, or
-// equivalent to put the tree in front of consumers.
+// not upload or serve the bytes — the operator's build farm runs
+// `rclone sync`, `aws s3 sync`, `git push`, or equivalent to put the
+// tree in front of consumers.
+//
+// publish also materialises a static package-browser site at the repo
+// root (index.html + assets/) and, alongside each .peipkg, the package's
+// own manifest.json and files.json as sidecars. These are unsigned
+// conveniences the website reads at runtime; trust still derives from the
+// signed indexes and the signed copies inside each package.
 package main
 
 import (
