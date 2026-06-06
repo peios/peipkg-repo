@@ -1,0 +1,48 @@
+/* Self-hosted fonts (latin subset) — replaces the Google Fonts CDN so
+   pkgs.peios.org makes no third-party requests on load. Sourced from
+   Google Fonts; both families are under the SIL Open Font License 1.1
+   (Martian Mono © The Martian Mono Project Authors; IBM Plex © IBM).
+
+   Martian Mono and IBM Plex Sans are variable fonts (one file spans the
+   weight range); IBM Plex Mono ships one file per weight. Glyphs outside
+   the latin subset fall back to the stack declared in style.css. */
+
+@font-face {
+  font-family: 'Martian Mono';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('/assets/fonts/martianmono.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('/assets/fonts/ibmplexsans.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/assets/fonts/ibmplexmono-400.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/assets/fonts/ibmplexmono-500.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/assets/fonts/ibmplexmono-600.woff2') format('woff2');
+}
